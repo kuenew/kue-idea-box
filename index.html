@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anonymous University Feedback</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Inter Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen p-4 sm:p-8">
+
+    <div id="app" class="max-w-4xl mx-auto">
+        <!-- Header -->
+        <header class="text-center py-6 mb-8 bg-white shadow-lg rounded-xl">
+            <h1 class="text-3xl sm:text-4xl font-extrabold text-blue-800">KUE idea box</h1>
+            <p id="role-display" class="text-sm mt-1 text-gray-600">Loading user role...</p>
+            
+            <!-- Role Switcher for Demo Purposes -->
+            <div class="mt-4">
+                <button id="role-switch-btn" class="px-4 py-2 text-sm font-semibold rounded-full shadow-md transition-colors duration-200"></button>
+            </div>
+        </header>
+
+        <!-- Main Content Area (Conditional rendering handled by JavaScript) -->
+        <div id="content-area">
+            <!-- Loading State -->
+            <div id="loading" class="text-center p-10 bg-white rounded-xl shadow-lg">
+                <p class="text-lg font-medium text-gray-500">Connecting to the database...</p>
+                <div class="mt-4 flex justify-center">
+                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Firebase Imports and Application Logic -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, collection, onSnapshot, query, addDoc, serverTimestamp, setLogLevel 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase Variables (Provided by Canvas Environment)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'anonymous-feedback-app';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+
+        // Set logging for debugging
+        setLogLevel('debug');
+
+        // --- ADMIN PASSWORD SETUP ---
+        const ADMIN_PASSWORD = "kue@2018#";
+        
+        let currentUserId = null;
+        let isAdmin = false;
+        let isAuthReady = false;
+        let isCommentsUnlocked = false; 
+        
+        // LocalStorage key for forcing student view in demo
+        const DEMO_MODE_KEY = 'feedbackAppDemoMode';
+
+        const roleDisplay = document.getElementById('role-display');
+        const contentArea = document.getElementById('content-area');
+        const roleSwitchBtn = document.getElementById('role-switch-btn');
+        
+        // --- CORE APPLICATION LOGIC ---
+
+        /**
+         * Determines if the user is an Admin (signed in via custom token)
+         * or a Student (signed in anonymously).
+         */
+        async function handleAuth() {
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Authentication Error. Attempting anonymous sign-in.", error);
+                await signInAnonymously(auth);
+            }
+        }
+        
+        function updateRoleDisplay(userId, roleIsAdmin) {
+            roleDisplay.innerHTML = roleIsAdmin
+                ? `<span class="font-bold text-red-600">Admin Mode</span> (User ID: ${userId})`
+                : `<span class="font-bold text-green-600">Student Mode</span> (Anonymous ID: ${userId})`;
+
+            if (roleIsAdmin) {
+                roleSwitchBtn.textContent = 'Switch to Student View';
+                roleSwitchBtn.className = 'px-4 py-2 text-sm font-semibold rounded-full shadow-md transition-colors duration-200 bg-red-500 text-white hover:bg-red-600';
+                roleSwitchBtn.onclick = () => setDemoMode('student');
+            } else {
+                roleSwitchBtn.textContent = 'Switch to Admin View';
+                roleSwitchBtn.className = 'px-4 py-2 text-sm font-semibold rounded-full shadow-md transition-colors duration-200 bg-blue-500 text-white hover:bg-blue-600';
+                roleSwitchBtn.onclick = () => setDemoMode('admin');
+            }
+        }
+
+        function setDemoMode(mode) {
+            if (mode === 'student') {
+                localStorage.setItem(DEMO_MODE_KEY, 'student');
+            } else {
+                localStorage.removeItem(DEMO_MODE_KEY);
+                isCommentsUnlocked = false; 
+            }
+            
+            const user = auth.currentUser;
+            if (user) {
+                let baseIsAdmin = !user.isAnonymous;
+                const demoMode = localStorage.getItem(DEMO_MODE_KEY);
+                
+                isAdmin = (demoMode !== 'student' && baseIsAdmin);
+                
+                updateRoleDisplay(user.uid, isAdmin);
+            }
+
+            initializeAppFeatures();
+        }
+
+        function initializeAppFeatures() {
+            if (!isAuthReady) return;
+
+            contentArea.innerHTML = '';
+            
+            if (isAdmin) {
+                renderAdminView();
+            } else {
+                renderStudentForm();
+            }
+
+            setupRealtimeListener();
+        }
+        
+        /**
+         * Checks the entered password and unlocks the comments view if correct.
+         */
+        function handleAdminLogin(password) {
+            const loginMessageBox = document.getElementById('login-message-box');
+            loginMessageBox.classList.add('hidden'); 
+
+            if (password === ADMIN_PASSWORD) {
+                isCommentsUnlocked = true;
+                initializeAppFeatures();
+            } else {
+                loginMessageBox.textContent = "Incorrect Password. Access Denied.";
+                loginMessageBox.classList.remove('hidden');
+                loginMessageBox.classList.remove('bg-green-100', 'text-green-700');
+                loginMessageBox.classList.add('bg-red-100', 'text-red-700');
+            }
+        }
+
+        // Firestore path for public suggestions
+        const getCollectionRef = () => collection(db, `/artifacts/${appId}/public/data/suggestions`);
+
+        /**
+         * Sets up the real-time listener for all submissions.
+         */
+        function setupRealtimeListener() {
+            const submissionsList = document.getElementById('submissions-list');
+            if (!isAdmin || !isCommentsUnlocked || !submissionsList) return; 
+            
+            const suggestionsQuery = query(getCollectionRef());
+            
+            onSnapshot(suggestionsQuery, (snapshot) => {
+                const submissions = [];
+                snapshot.forEach(doc => {
+                    submissions.push({ id: doc.id, ...doc.data() });
+                });
+                
+                submissions.sort((a, b) => (b.timestamp?.toMillis() || 0) - (a.timestamp?.toMillis() || 0));
+
+                displayAdminSubmissions(submissions);
+            }, (error) => {
+                console.error("Error listening to submissions:", error);
+                if (isAdmin) {
+                    submissionsList.innerHTML = `<p class="text-red-500 p-4">Error fetching data: ${error.message}</p>`;
+                }
+            });
+        }
+
+        /**
+         * Handles student submission of a new idea/comment.
+         */
+        async function submitIdea(content) {
+            if (!content.trim()) {
+                showMessage("Your submission cannot be empty!", "error");
+                return;
+            }
+            if (!currentUserId) {
+                 showMessage("Error: User not identified. Please refresh.", "error");
+                 return;
+            }
+
+            const ideaData = {
+                content: content.trim(),
+                submitterId: currentUserId, 
+                timestamp: serverTimestamp(),
+            };
+
+            try {
+                await addDoc(getCollectionRef(), ideaData);
+                showMessage("Idea submitted successfully! Thank you for your anonymous feedback.", "success");
+                document.getElementById('suggestion-input').value = ''; 
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                showMessage("Failed to submit idea. Please try again.", "error");
+            }
+        }
+        
+        // --- DATE GROUPING LOGIC ---
+
+        function isToday(someDate) {
+            const today = new Date();
+            return someDate.getDate() === today.getDate() &&
+                someDate.getMonth() === today.getMonth() &&
+                someDate.getFullYear() === today.getFullYear();
+        }
+
+        function isYesterday(someDate) {
+            const yesterday = new Date();
+            yesterday.setDate(yesterday.getDate() - 1);
+            return someDate.getDate() === yesterday.getDate() &&
+                someDate.getMonth() === yesterday.getMonth() &&
+                someDate.getFullYear() === yesterday.getFullYear();
+        }
+
+        function isLast7Days(someDate) {
+            const sevenDaysAgo = new Date();
+            sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+            return someDate > sevenDaysAgo; 
+        }
+
+        function groupSubmissionsByDate(submissions) {
+            const groups = {
+                'Today': [],
+                'Yesterday': [],
+                'Last 7 Days': [],
+                'Older': []
+            };
+
+            submissions.forEach(sub => {
+                const subDate = sub.timestamp ? new Date(sub.timestamp.toMillis()) : new Date(0); 
+
+                if (isToday(subDate)) {
+                    groups['Today'].push(sub);
+                } else if (isYesterday(subDate)) {
+                    groups['Yesterday'].push(sub);
+                } else if (isLast7Days(subDate)) {
+                    groups['Last 7 Days'].push(sub);
+                } else {
+                    groups['Older'].push(sub);
+                }
+            });
+            return groups;
+        }
+
+        // --- UI RENDERING (STUDENT) ---
+        
+        function renderStudentForm() {
+            contentArea.innerHTML = `
+                <div class="bg-white p-6 sm:p-8 rounded-xl shadow-lg transition-all duration-300">
+                    <h2 class="text-2xl font-semibold text-gray-800 mb-4">Submit Your Anonymous Idea or Comment</h2>
+                    <p class="text-gray-600 mb-6">Your identity is kept completely private. This is a secure channel for feedback.</p>
+                    
+                    <form id="submission-form">
+                        <textarea id="suggestion-input" rows="6" 
+                                  class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition-colors resize-none"
+                                  placeholder="Type your suggestion, idea, or comment here..."></textarea>
+                        
+                        <div id="message-box" class="mt-4 p-3 rounded-lg hidden"></div>
+                        
+                        <div class="flex mt-6">
+                            <button type="submit" 
+                                    class="w-full px-4 py-3 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 transition-all duration-200 shadow-md">
+                                Submit Anonymously
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            `;
+            
+            document.getElementById('submission-form').addEventListener('submit', (e) => {
+                e.preventDefault();
+                const content = document.getElementById('suggestion-input').value;
+                submitIdea(content);
+            });
+        }
+
+        // --- UI RENDERING (ADMIN) ---
+
+        function renderAdminView() {
+            if (isCommentsUnlocked) {
+                contentArea.innerHTML = `
+                    <div class="bg-white p-6 sm:p-8 rounded-xl shadow-lg">
+                        <h2 class="text-2xl font-semibold text-gray-800 mb-4 border-b pb-2">All Submitted Ideas</h2>
+                        <div class="flex items-center justify-between mb-4">
+                            <p class="text-gray-600">Real-time feed of all anonymous submissions, grouped by date.</p>
+                            <button id="toggle-ids-btn" class="text-sm px-3 py-1 bg-gray-200 rounded-full hover:bg-gray-300 transition">
+                                Toggle Submitter IDs
+                            </button>
+                        </div>
+                        <div id="submissions-list" class="space-y-4">
+                            <p class="text-center text-gray-500 italic">Loading submissions...</p>
+                        </div>
+                    </div>
+                `;
+                document.getElementById('toggle-ids-btn')?.addEventListener('click', toggleSubmitterIds);
+            } else {
+                 contentArea.innerHTML = `
+                    <div class="bg-white p-6 sm:p-8 rounded-xl shadow-lg">
+                        <h2 class="text-2xl font-semibold text-gray-800 mb-4">Admin Access Required</h2>
+                        <p class="text-gray-600 mb-6">Enter the administrator password to view anonymous submissions.</p>
+                        
+                        <form id="admin-login-form">
+                            <input type="password" id="admin-password-input"
+                                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-red-500 focus:border-red-500 transition-colors"
+                                   placeholder="Enter Admin Password">
+                            
+                            <div id="login-message-box" class="mt-4 p-3 rounded-lg hidden"></div>
+
+                            <button type="submit" 
+                                    class="mt-6 w-full px-4 py-3 bg-red-600 text-white font-bold rounded-lg hover:bg-red-700 transition-all duration-200 shadow-md">
+                                Unlock Submissions
+                            </button>
+                        </form>
+                    </div>
+                `;
+                document.getElementById('admin-login-form')?.addEventListener('submit', (e) => {
+                    e.preventDefault();
+                    const password = document.getElementById('admin-password-input').value;
+                    handleAdminLogin(password);
+                });
+            }
+        }
+
+        function displayAdminSubmissions(allSubmissions) {
+            const submissionsList = document.getElementById('submissions-list');
+            if (!submissionsList) return; 
+
+            if (allSubmissions.length === 0) {
+                submissionsList.innerHTML = `<p class="text-center text-gray-500 italic p-4">No submissions received yet.</p>`;
+                return;
+            }
+
+            const groupedSubmissions = groupSubmissionsByDate(allSubmissions);
+            let htmlContent = '';
+            let totalRendered = 0;
+
+            const groupOrder = ['Today', 'Yesterday', 'Last 7 Days', 'Older'];
+
+            groupOrder.forEach(groupName => {
+                const submissions = groupedSubmissions[groupName];
+                if (submissions.length > 0) {
+                    htmlContent += `
+                        <h3 class="text-lg font-bold text-gray-700 mt-6 mb-2 pt-2 border-t border-gray-300 first:mt-0 first:pt-0 first:border-t-0">${groupName} (${submissions.length})</h3>
+                    `;
+                    htmlContent += submissions.map(sub => {
+                        const date = sub.timestamp ? new Date(sub.timestamp.toMillis()).toLocaleString() : 'N/A';
+                        return `
+                            <div id="submission-${sub.id}" class="p-4 bg-gray-50 rounded-lg border border-gray-200 transition-shadow hover:shadow-md">
+                                <p class="text-gray-800 font-medium whitespace-pre-wrap">${sub.content}</p>
+                                <div class="mt-3 flex flex-col sm:flex-row justify-between items-start sm:items-center border-t pt-2 border-gray-200">
+                                    <div class="text-xs text-gray-500 flex flex-col sm:flex-row sm:space-x-4">
+                                        <span>Submitted: ${date}</span>
+                                        <span class="submitter-id hidden font-mono text-blue-600 mt-1 sm:mt-0">ID: ${sub.submitterId.substring(0, 8)}...</span>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+                    totalRendered += submissions.length;
+                }
+            });
+
+            if (totalRendered === 0) {
+                 submissionsList.innerHTML = `<p class="text-center text-gray-500 italic p-4">No submissions received yet.</p>`;
+            } else {
+                submissionsList.innerHTML = htmlContent;
+            }
+        }
+
+        function toggleSubmitterIds() {
+            const ids = document.querySelectorAll('.submitter-id');
+            const btn = document.getElementById('toggle-ids-btn');
+            let isVisible = false;
+
+            ids.forEach(id => {
+                if (id.classList.contains('hidden')) {
+                    id.classList.remove('hidden');
+                    isVisible = true;
+                } else {
+                    id.classList.add('hidden');
+                }
+            });
+
+            btn.textContent = isVisible ? 'Hide Submitter IDs' : 'Show Submitter IDs';
+            btn.classList.toggle('bg-gray-200', !isVisible);
+            btn.classList.toggle('bg-red-200', isVisible);
+        }
+
+        /**
+         * Displays a temporary success or error message in the message box.
+         */
+        function showMessage(text, type) {
+            const box = document.getElementById('message-box');
+            if (!box) return;
+
+            box.classList.remove('hidden', 'bg-red-100', 'text-red-700', 'bg-green-100', 'text-green-700');
+            box.textContent = text;
+
+            if (type === 'success') {
+                box.classList.add('bg-green-100', 'text-green-700');
+            } else if (type === 'error') {
+                box.classList.add('bg-red-100', 'text-red-700');
+            }
+
+            box.classList.remove('hidden');
+
+            setTimeout(() => {
+                box.classList.add('hidden');
+            }, 5000);
+        }
+
+        // --- AUTHENTICATION SETUP (Moved after function definitions) ---
+        
+        // Listen for Auth State Changes
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                currentUserId = user.uid;
+                
+                let baseIsAdmin = !user.isAnonymous;
+                const demoMode = localStorage.getItem(DEMO_MODE_KEY);
+                if (demoMode === 'student') {
+                    isAdmin = false;
+                } else {
+                    isAdmin = baseIsAdmin;
+                }
+                
+                updateRoleDisplay(currentUserId, isAdmin);
+                
+                isAuthReady = true;
+                initializeAppFeatures();
+            } else {
+                handleAuth();
+            }
+        });
+
+        // Start the authentication process
+        if (!auth.currentUser) {
+            handleAuth();
+        }
+
+    </script>
+</body>
+</html>
