@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Anonymous University Feedback</title>
-    <!-- Load Tailwind CSS -->
+    <!-- Load Tailwind CSS (Maintains 1-file constraint) -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Load Inter Font -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
@@ -26,15 +26,9 @@
             </div>
         </header>
 
-        <!-- Main Content Area (Conditional rendering handled by JavaScript) -->
+        <!-- Main Content Area: Content will be injected here immediately by JS -->
         <div id="content-area">
-            <!-- Loading State -->
-            <div id="loading" class="text-center p-10 bg-white rounded-xl shadow-lg">
-                <p class="text-lg font-medium text-gray-500">Connecting to the database...</p>
-                <div class="mt-4 flex justify-center">
-                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
-                </div>
-            </div>
+            <!-- Loading state is now handled by initial render of the student form -->
         </div>
     </div>
 
@@ -111,10 +105,15 @@
             }
         }
 
+        /**
+         * Sets the demo mode (student or admin) and refreshes the view.
+         * The 'admin' mode is achieved by removing the DEMO_MODE_KEY from localStorage.
+         */
         function setDemoMode(mode) {
             if (mode === 'student') {
                 localStorage.setItem(DEMO_MODE_KEY, 'student');
             } else {
+                // Clearing the key means the app will use the Firebase token status
                 localStorage.removeItem(DEMO_MODE_KEY);
                 isCommentsUnlocked = false; 
             }
@@ -124,6 +123,7 @@
                 let baseIsAdmin = !user.isAnonymous;
                 const demoMode = localStorage.getItem(DEMO_MODE_KEY);
                 
+                // isAdmin is true only if the token is admin AND the user hasn't explicitly chosen 'student' view
                 isAdmin = (demoMode !== 'student' && baseIsAdmin);
                 
                 updateRoleDisplay(user.uid, isAdmin);
@@ -132,18 +132,22 @@
             initializeAppFeatures();
         }
 
+        /**
+         * Renders the application features based on role and auth status.
+         */
         function initializeAppFeatures() {
-            if (!isAuthReady) return;
+            contentArea.innerHTML = ''; // Clear existing content
 
-            contentArea.innerHTML = '';
-            
             if (isAdmin) {
                 renderAdminView();
             } else {
                 renderStudentForm();
             }
 
-            setupRealtimeListener();
+            // Only start data listeners if we are fully authenticated, authorized, AND unlocked (admin view)
+            if (isAuthReady && isAdmin && isCommentsUnlocked) {
+                 setupRealtimeListener();
+            }
         }
         
         /**
@@ -155,7 +159,8 @@
 
             if (password === ADMIN_PASSWORD) {
                 isCommentsUnlocked = true;
-                initializeAppFeatures();
+                // Re-run features to swap to the unlocked admin view and start listeners
+                initializeAppFeatures(); 
             } else {
                 loginMessageBox.textContent = "Incorrect Password. Access Denied.";
                 loginMessageBox.classList.remove('hidden');
@@ -436,7 +441,7 @@
             }, 5000);
         }
 
-        // --- AUTHENTICATION SETUP (Moved after function definitions) ---
+        // --- AUTHENTICATION SETUP ---
         
         // Listen for Auth State Changes
         onAuthStateChanged(auth, (user) => {
@@ -444,7 +449,15 @@
                 currentUserId = user.uid;
                 
                 let baseIsAdmin = !user.isAnonymous;
-                const demoMode = localStorage.getItem(DEMO_MODE_KEY);
+                let demoMode = localStorage.getItem(DEMO_MODE_KEY);
+
+                // Default Logic Change: If the user has an admin token but hasn't explicitly chosen a role 
+                // (i.e., demoMode is null), we default the view to 'student' and save that state.
+                if (baseIsAdmin && demoMode === null) {
+                    localStorage.setItem(DEMO_MODE_KEY, 'student');
+                    demoMode = 'student';
+                }
+
                 if (demoMode === 'student') {
                     isAdmin = false;
                 } else {
@@ -454,16 +467,17 @@
                 updateRoleDisplay(currentUserId, isAdmin);
                 
                 isAuthReady = true;
+                // Re-run the feature initialization now that auth is complete
                 initializeAppFeatures();
             } else {
+                // No user found (first time or session expired), attempt sign in
                 handleAuth();
             }
         });
 
-        // Start the authentication process
-        if (!auth.currentUser) {
-            handleAuth();
-        }
+        // Start the application immediately after functions are defined.
+        // This renders the default view (Student Form) while waiting for external scripts and auth.
+        initializeAppFeatures();
 
     </script>
 </body>
